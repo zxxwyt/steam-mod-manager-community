@@ -56,8 +56,10 @@ public sealed class FileSystemLocalModMonitorTests
         Assert.Equal("新名称 2.0", updated.Name);
     }
 
-    [Fact]
-    public async Task MissingTargetIsDetectedWhenItsAncestorsAndThenTheTargetAreCreated()
+    [Theory]
+    [InlineData(0)]
+    [InlineData(120)]
+    public async Task MissingTargetIsDetectedWhenItsAncestorsAndThenTheTargetAreCreated(int delayBetweenDirectoriesMs)
     {
         using var fixture = new Fixture(createTarget: false);
         await using var watch = fixture.Watch();
@@ -66,9 +68,9 @@ public sealed class FileSystemLocalModMonitorTests
         var next = watch.NextAsync();
 
         Directory.CreateDirectory(Path.Combine(fixture.Root, "selected-game"));
-        await Task.Delay(120, TestContext.Current.CancellationToken);
+        await Task.Delay(delayBetweenDirectoriesMs, TestContext.Current.CancellationToken);
         Directory.CreateDirectory(Path.Combine(fixture.Root, "selected-game", "workshop"));
-        await Task.Delay(120, TestContext.Current.CancellationToken);
+        await Task.Delay(delayBetweenDirectoriesMs, TestContext.Current.CancellationToken);
         Directory.CreateDirectory(fixture.Target);
         await File.WriteAllTextAsync(Path.Combine(fixture.Target, "late.mod"), "首次下载", TestContext.Current.CancellationToken);
 
