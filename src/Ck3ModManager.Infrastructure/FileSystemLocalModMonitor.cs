@@ -71,6 +71,7 @@ public sealed class FileSystemLocalModMonitor : ILocalModMonitor
         private sealed record Watch(FileSystemWatcher Watcher, bool Recursive);
         private readonly Dictionary<string, Watch> _watches = new(SteamGameLocator.PathComparer);
         private Target[] _targets = [];
+        private string[] _pendingDirectories = [];
         private int _reset;
 
         public void Configure(IEnumerable<string> paths)
@@ -88,14 +89,25 @@ public sealed class FileSystemLocalModMonitor : ILocalModMonitor
             }
             Volatile.Write(ref _targets, targets.ToArray());
             var desired = new Dictionary<string, bool>(SteamGameLocator.PathComparer);
+            var pendingDirectories = new HashSet<string>(SteamGameLocator.PathComparer);
             foreach (var target in targets)
             {
-                if (!target.IsFile && Directory.Exists(target.Path)) desired[target.Path] = true;
-                var parent = Path.GetDirectoryName(target.Path);
-                while (parent is not null && !Directory.Exists(parent)) parent = Path.GetDirectoryName(parent);
-                // 不存在目标只监测最近存在的父目录；不递归观察整个用户目录。
-                if (parent is not null && !desired.ContainsKey(parent)) desired[parent] = false;
+                var directoryExists = !target.IsFile && Directory.Exists(target.Path);
+                if (directoryExists) desired[target.Path] = true;
+                var child = target.Path;
+                var parent = Path.GetDirectoryName(child);
+                // 缺失目录只监听最近存在的父目录，并记录等待出现的直接子目录。
+                while (parent is not null && !Directory.Exists(parent))
+                {
+                    child = parent;
+                    parent = Path.GetDirectoryName(child);
+                }
+                if (parent is null) continue;
+                desired.TryAdd(parent, false);
+                if (!SamePath(child, target.Path) || !target.IsFile && !directoryExists)
+                    pendingDirectories.Add(child);
             }
+            Volatile.Write(ref _pendingDirectories, pendingDirectories.ToArray());
 
             if (Interlocked.Exchange(ref _reset, 0) != 0) DisposeWatches();
             foreach (var (path, recursive) in desired)
@@ -129,6 +141,9 @@ public sealed class FileSystemLocalModMonitor : ILocalModMonitor
                 _watches[path].Watcher.Dispose();
                 _watches.Remove(path);
             }
+
+            // 目录可能在计算监听位置后、新监听器启用前创建。
+            if (pendingDirectories.Any(Directory.Exists)) changes.TryWrite(true);
         }
 
         private void OnStructure(object sender, FileSystemEventArgs change)
@@ -143,9 +158,16 @@ public sealed class FileSystemLocalModMonitor : ILocalModMonitor
 
         private void OnChanged(object sender, FileSystemEventArgs change)
         {
+            if (Volatile.Read(ref _pendingDirectories).Contains(change.FullPath, SteamGameLocator.PathComparer) &&
+                Directory.Exists(change.FullPath))
+            {
+                changes.TryWrite(true);
+                return;
+            }
+
             foreach (var target in Volatile.Read(ref _targets))
             {
-                if (target.IsFile && SamePath(target.Path, change.FullPath) ||
+                if (SamePath(target.Path, change.FullPath) ||
                     !target.IsFile && Inside(target.Path, change.FullPath) &&
                     (string.Equals(Path.GetFileName(change.FullPath), "descriptor.mod", StringComparison.OrdinalIgnoreCase) ||
                      string.Equals(Path.GetExtension(change.FullPath), ".mod", StringComparison.OrdinalIgnoreCase) ||
